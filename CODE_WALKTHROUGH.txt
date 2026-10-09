@@ -1,0 +1,403 @@
+MYSQL INNODB CLUSTER LIGHT MONITOR
+CODE WALKTHROUGH - SIMPLE ENGLISH
+================================
+
+OVERALL IDEA
+------------
+Think of the script as a NOC guard.
+
+It checks:
+1. Are all 3 DB nodes visible?
+2. Is exactly one PRIMARY online?
+3. Are the SECONDARY nodes online?
+4. Is Router port 6446 reachable?
+5. Is each DB port 3306 reachable?
+6. Is latency normal?
+7. Is osTicket reachable?
+8. Is replication work piling up?
+
+If normal, it only logs.
+If a condition changes to WARNING/CRITICAL, it alerts once.
+When it recovers, it sends one RECOVERY notice.
+
+SEQUENTIAL FUNCTION FLOW
+------------------------
+Program start
+  -> main()
+  -> build_arg_parser()
+  -> load_json()
+  -> validate_config()
+  -> collect_snapshot()
+       -> tcp_probe() for Router
+       -> fetch_cluster_view()
+       -> tcp_probe() for each DB node
+       -> latency_state()
+       -> app_probe() if enabled
+  -> evaluate()
+  -> summarize()
+  -> process_alert_transitions()
+       -> send_email() if needed
+       -> send_telegram() if needed
+       -> append_jsonl()
+  -> save_state()
+  -> sleep
+  -> repeat
+
+1. if __name__ == "__main__": main()
+----------------------------------------
+This is the program's front door.
+When the file is executed directly, Python calls main().
+
+Analogy:
+The building guard starts the shift by entering through the main entrance.
+
+2. main()
+---------
+main() controls the whole program.
+
+It:
+- reads command-line flags
+- loads config
+- prepares logs
+- runs the monitoring cycle
+- waits
+- repeats
+
+Analogy:
+main() is the shift supervisor.
+
+3. build_arg_parser()
+---------------------
+This creates flags such as:
+
+--once
+  Run one cycle and stop.
+
+--interval 20
+  Run every 20 seconds.
+
+--validate-config
+  Check the configuration only.
+
+--print-json
+  Print raw monitoring data.
+
+--disable-email
+  Monitor normally but send no email.
+
+Expected:
+python3 mysql_cluster_monitor_light.py --config config.json --once
+
+Result:
+One check runs, then the program exits.
+
+4. load_json()
+--------------
+Reads config.json.
+
+The config tells the script:
+- cluster name
+- DB hostnames
+- Router endpoint
+- thresholds
+- email recipients
+- osTicket URL
+
+Analogy:
+config.json is the guard's checklist.
+
+5. validate_config()
+--------------------
+Checks that important sections exist.
+
+Command:
+python3 mysql_cluster_monitor_light.py --config config.json --validate-config
+
+Expected:
+CONFIG OK
+
+Analogy:
+The guard checks that keys, radio, and checklist are present before patrol.
+
+6. collect_snapshot()
+---------------------
+Collects one "picture" of the environment.
+
+Calls:
+- tcp_probe()
+- fetch_cluster_view()
+- latency_state()
+- app_probe()
+
+Analogy:
+A snapshot is one photograph of system health at that moment.
+
+7. tcp_probe()
+--------------
+Tries a very small TCP connection.
+
+DB nodes:
+port 3306
+
+Router:
+port 6446
+
+It records:
+- average latency
+- maximum latency
+- jitter
+- failed sample percentage
+
+Example:
+DBNODE2 avg=34.7 ms max=36.1 ms jitter=2.4 ms loss=0%
+
+Analogy:
+Calling another office and measuring how quickly someone answers.
+
+8. latency_state()
+------------------
+Converts raw numbers into:
+OK
+CHECK
+WATCH
+CRITICAL
+
+Default:
+35 ms  -> OK
+120 ms -> CHECK
+230 ms -> WATCH
+600 ms -> CRITICAL
+
+Analogy:
+Green, yellow, orange, red traffic lights.
+
+9. fetch_cluster_view()
+-----------------------
+Asks MySQL:
+Who is in the cluster?
+Who is PRIMARY?
+Who is SECONDARY?
+Who is ONLINE?
+
+Uses:
+performance_schema.replication_group_members
+
+Healthy example:
+dbnode1 ONLINE SECONDARY
+dbnode2 ONLINE PRIMARY
+dbnode3 ONLINE SECONDARY
+
+It also checks:
+performance_schema.replication_group_member_stats
+
+Important metric:
+COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE
+
+0 means caught up.
+500 means transactions are waiting to be applied.
+
+Analogy:
+A pile of documents waiting on a worker's desk.
+
+10. app_probe()
+---------------
+Optional lightweight HTTP GET to osTicket.
+
+It does not log in.
+It does not create tickets.
+
+It only checks:
+Does the page answer?
+How long did it take?
+
+HTTP 200 means success.
+
+Analogy:
+Checking whether the shop door opens, not shopping inside.
+
+11. evaluate()
+--------------
+This is the decision-maker.
+
+Examples:
+3/3 ONLINE + 1 PRIMARY -> normal
+2/3 ONLINE -> WARNING
+1/3 ONLINE -> CRITICAL
+No PRIMARY -> CRITICAL
+High applier queue -> WARNING/CRITICAL
+Router down -> CRITICAL
+osTicket down -> CRITICAL
+
+Analogy:
+The guard decides whether an observation is normal or an emergency.
+
+12. summarize()
+---------------
+Turns technical measurements into readable text.
+
+Example:
+Cluster: osticketCluster
+PRIMARY: dbnode2.iestinc.internal
+Router: UP
+DBNODE1: OK
+DBNODE2: OK
+DBNODE3: OK
+Actionable conditions: none
+
+13. process_alert_transitions()
+-------------------------------
+Anti-spam logic.
+
+13:00 DBNODE3 down
+-> sends alert
+
+13:02 still down
+-> no repeat alert
+
+13:30 recovered
+-> sends RECOVERY
+
+Analogy:
+Call the fire department when the fire starts, not every two minutes for the same fire.
+
+14. load_state() / save_state()
+-------------------------------
+Remember:
+- which alerts are already active
+- previous PRIMARY
+- when metrics were last written
+
+State file:
+/var/lib/mysql-cluster-monitor/state.json
+
+Analogy:
+The guard's notebook from the previous patrol.
+
+15. append_jsonl()
+------------------
+Writes one compact JSON object per line.
+
+Files:
+/var/log/mysql-cluster-monitor/metrics.jsonl
+/var/log/mysql-cluster-monitor/events.jsonl
+
+Why JSONL?
+- easy to gzip
+- easy to grep
+- easy to import into a database
+- each line is independent
+
+16. send_email()
+----------------
+Sends alert to:
+- multiple To recipients
+- multiple Cc recipients
+
+Password comes from environment variable.
+It is not hard-coded in Python.
+
+17. send_telegram()
+-------------------
+Optional.
+Uses a bot token and chat ID from environment variables.
+
+18. Why this version is lighter
+-------------------------------
+Removed:
+- SSH OS probes
+- CPU/RAM collection
+- journalctl
+- MySQL error-log scanning
+- repeated subprocess calls
+
+Kept:
+- cluster state
+- Router
+- TCP/3306
+- latency
+- app HTTP
+- replication queue
+
+Default:
+2 TCP samples every 120 seconds.
+Metrics written every 10 minutes.
+
+19. systemd limits
+------------------
+CPUQuota=5%
+MemoryMax=150M
+
+These put hard ceilings on the service.
+
+20. Expected healthy output
+---------------------------
+Cluster: osticketCluster
+PRIMARY: dbnode2.iestinc.internal
+Members:
+  dbnode1: ONLINE / SECONDARY
+  dbnode2: ONLINE / PRIMARY
+  dbnode3: ONLINE / SECONDARY
+Router: UP
+Latency:
+  DBNODE1: OK avg=2.3 ms
+  DBNODE2: OK avg=35.4 ms
+  DBNODE3: OK avg=77.2 ms
+Actionable conditions: none
+
+Meaning:
+Everything is healthy.
+
+21. Expected failover sequence
+------------------------------
+Suppose DBNODE2 is PRIMARY.
+
+DBA:
+sudo systemctl stop mysqld
+
+Monitor may see:
+- DBNODE2 missing
+- only 2/3 members online
+- new PRIMARY on DBNODE1 or DBNODE3
+
+Alert:
+[CRITICAL] osticketCluster action required
+
+Later DBNODE2 starts:
+sudo systemctl start mysqld
+
+Monitor sees recovery and eventually sends:
+[RECOVERY] osticketCluster condition cleared
+
+22. Failover test mode
+----------------------
+Use:
+python3 mysql_cluster_monitor_light.py --config config.json --interval 20
+
+This gives faster visibility only during the planned test.
+
+After testing:
+return to normal 120-second polling.
+
+23. What the script does NOT do
+-------------------------------
+It does not:
+- start/stop MySQL
+- promote a node manually
+- modify Router
+- write osTicket data
+- repair replication
+- kill sessions
+
+It observes and alerts only.
+
+FINAL ANALOGY
+-------------
+DB nodes = three employees
+PRIMARY = current team leader
+Router = receptionist
+osTicket = customer service desk
+Monitor = NOC/security guard
+
+The guard quietly records normal conditions.
+If something important changes, the guard calls DBA/NOC.
+When service recovers, the guard sends a recovery notice.

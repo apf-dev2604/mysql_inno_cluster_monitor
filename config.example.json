@@ -1,0 +1,86 @@
+{
+  "monitor_name": "osticket-cluster-watchdog-light",
+  "cluster_name": "osticketCluster",
+  "expected_members": 3,
+  "interval_seconds": 120,
+  "state_file": "/var/lib/mysql-cluster-monitor/state.json",
+  "mysql": {
+    "user": "cluster_monitor",
+    "password_env": "CLMON_DB_PASSWORD",
+    "connect_timeout_seconds": 4
+  },
+  "router": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "rw_port": 6446
+  },
+  "application": {
+    "enabled": false,
+    "url": "https://REPLACE-WITH-OSTICKET-URL/",
+    "timeout_seconds": 4,
+    "expected_http_codes": [
+      200,
+      301,
+      302
+    ]
+  },
+  "nodes": [
+    {
+      "name": "DBNODE1",
+      "host": "dbnode1.iestinc.internal",
+      "mysql_port": 3306
+    },
+    {
+      "name": "DBNODE2",
+      "host": "dbnode2.iestinc.internal",
+      "mysql_port": 3306
+    },
+    {
+      "name": "DBNODE3",
+      "host": "dbnode3.iestinc.internal",
+      "mysql_port": 3306
+    }
+  ],
+  "thresholds": {
+    "latency_samples": 2,
+    "tcp_timeout_seconds": 2,
+    "latency_check_ms": 100,
+    "latency_watch_ms": 200,
+    "latency_critical_ms": 500,
+    "latency_watch_jitter_ms": 100,
+    "latency_critical_loss_pct": 50,
+    "applier_queue_warning": 100,
+    "applier_queue_critical": 1000,
+    "application_latency_warning_ms": 2000
+  },
+  "notifications": {
+    "email_on_check": false
+  },
+  "logging": {
+    "directory": "/var/log/mysql-cluster-monitor",
+    "metrics_jsonl": "metrics.jsonl",
+    "events_jsonl": "events.jsonl",
+    "metrics_snapshot_every_seconds": 600
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "starttls": true,
+    "username": "monitor@example.com",
+    "password_env": "CLMON_SMTP_PASSWORD",
+    "from": "monitor@example.com",
+    "to": [
+      "dba@example.com",
+      "noc@example.com"
+    ],
+    "cc": [
+      "itmanager@example.com"
+    ]
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token_env": "CLMON_TELEGRAM_BOT_TOKEN",
+    "chat_id_env": "CLMON_TELEGRAM_CHAT_ID"
+  }
+}
