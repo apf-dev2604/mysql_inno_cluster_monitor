@@ -1,9 +1,0 @@
-/var/log/mysql-cluster-monitor/*.log /var/log/mysql-cluster-monitor/*.jsonl {
-    daily
-    rotate 30
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-}
