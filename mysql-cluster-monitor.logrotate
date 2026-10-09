@@ -1,0 +1,9 @@
+/home/allanf/scripts/mysql_inno_cluster_monitor/log/*.log /home/allanf/scripts/mysql_inno_cluster_monitor/log/*.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

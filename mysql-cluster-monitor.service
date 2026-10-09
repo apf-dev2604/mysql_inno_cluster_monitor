@@ -1,0 +1,25 @@
+[Unit]
+Description=MySQL InnoDB Cluster Monitor
+After=network-online.target mysqlrouter.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+#EnvironmentFile=/etc/mysql-cluster-monitor/env
+EnvironmentFile=/home/allanf/scripts/mysql_inno_cluster_monitor/env
+#ExecStart=/opt/mysql-cluster-monitor/venv/bin/python /opt/mysql-cluster-monitor/mysql_cluster_monitor_light.py --config /etc/mysql-cluster-monitor/config.json
+ExecStart=/home/allanf/.venv/bin/python /home/allanf/scripts/mysql_inno_cluster_monitor/mysql_cluster_monitor.py --config  /home/allanf/scripts/mysql_inno_cluster_monitor/config.json
+Restart=on-failure
+RestartSec=10
+CPUQuota=5%
+MemoryMax=150M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/home/allanf/scripts/mysql_inno_cluster_monitor/log /home/allanf/scripts/mysql_inno_cluster_monitor/
+
+[Install]
+WantedBy=multi-user.target
