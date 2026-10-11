@@ -1,0 +1,4 @@
+2026-10-11 11:43:44,441 | INFO | package: mysql.connector.plugins
+2026-10-11 11:43:44,441 | INFO | plugin_name: caching_sha2_password
+2026-10-11 11:43:44,441 | INFO | AUTHENTICATION_PLUGIN_CLASS: MySQLCachingSHA2PasswordAuthPlugin
+2026-10-11 11:43:45,009 | INFO | Cluster: osticketCluster | UTC: 2026-10-11T03:43:42+00:00 | PRIMARY: dbnode1.iestinc.internal | Members: |   dbnode1.iestinc.internal: ONLINE / PRIMARY |   dbnode2.iestinc.internal: ONLINE / SECONDARY |   dbnode3.iestinc.internal: ONLINE / SECONDARY | Router: UP | Latency: |   DBNODE1: OK avg=0.75 ms max=0.87 ms jitter=0.24 ms loss=0.0% |   DBNODE2: OK avg=35.13 ms max=35.18 ms jitter=0.1 ms loss=0.0% |   DBNODE3: OK avg=45.64 ms max=48.21 ms jitter=5.15 ms loss=0.0% | Actionable conditions: none

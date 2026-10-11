@@ -4,19 +4,16 @@
   "expected_members": 3,
   "interval_seconds": 120,
   "state_file": "/home/allanf/scripts/mysql_inno_cluster_monitor/log/state.json",
-
   "mysql": {
     "user": "cluster_monitor",
     "password_env": "CLMON_DB_PASSWORD",
     "connect_timeout_seconds": 4
   },
-
   "router": {
     "enabled": true,
     "host": "127.0.0.1",
     "rw_port": 6446
   },
-
   "application": {
     "enabled": false,
     "url": "https://tanya-uat.instawin.com.ph/scp/login.php",
@@ -27,7 +24,6 @@
       302
     ]
   },
-
   "nodes": [
     {
       "name": "DBNODE1",
@@ -45,7 +41,6 @@
       "mysql_port": 3306
     }
   ],
-
   "thresholds": {
     "latency_samples": 2,
     "tcp_timeout_seconds": 2,
@@ -58,18 +53,16 @@
     "applier_queue_critical": 1000,
     "application_latency_warning_ms": 2000
   },
-
   "notifications": {
     "email_on_check": false
   },
-
   "logging": {
     "directory": "/home/allanf/scripts/mysql_inno_cluster_monitor/log",
+    "monitor_log": "monitor.log",
     "metrics_jsonl": "metrics.jsonl",
     "events_jsonl": "events.jsonl",
     "metrics_snapshot_every_seconds": 600
   },
-
   "network_health_db": {
     "enabled": true,
     "schema": "monitor",
@@ -78,7 +71,6 @@
     "overlap_seconds": 600,
     "overlap_tail_bytes": 2097152
   },
-
   "email": {
     "enabled": true,
     "smtp_host": "smtp.gmail.com",
@@ -91,14 +83,12 @@
       "afaylona@gmail.com",
       "devmac10inc@gmail.com"
     ],
-    "cc": [
-      ""
-    ]
+    "cc": []
   },
-
   "telegram": {
     "enabled": false,
     "bot_token_env": "CLMON_TELEGRAM_BOT_TOKEN",
     "chat_id_env": "CLMON_TELEGRAM_CHAT_ID"
   }
 }
+

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, datetime as dt, json, logging, os, smtplib, socket, ssl, sys, time
+import argparse, datetime as dt, hashlib, json, logging, os, smtplib, socket, ssl, sys, time
 import urllib.parse, urllib.request
 from email.message import EmailMessage
 from pathlib import Path
@@ -17,6 +17,43 @@ def load_json(path):
 def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
 
+def daily_file_path(log_dir, configured_name, when=None):
+    """Return a UTC-dated path such as events_2026-10-11.jsonl."""
+    when = when or dt.datetime.now(UTC)
+    if isinstance(when, str):
+        when = dt.datetime.fromisoformat(when)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    else:
+        when = when.astimezone(UTC)
+    p = Path(configured_name)
+    stem = p.stem
+    suffix = p.suffix
+    return Path(log_dir) / f"{stem}_{when.strftime('%Y-%m-%d')}{suffix}"
+
+class DailyFileHandler(logging.FileHandler):
+    """FileHandler that writes to monitor_YYYY-MM-DD.log and switches at UTC midnight."""
+    def __init__(self, log_dir, configured_name, encoding="utf-8"):
+        self.log_dir = Path(log_dir)
+        self.configured_name = configured_name
+        self.current_day = None
+        super().__init__(daily_file_path(self.log_dir, self.configured_name), mode="a", encoding=encoding)
+        self.current_day = dt.datetime.now(UTC).date()
+
+    def emit(self, record):
+        day = dt.datetime.now(UTC).date()
+        if day != self.current_day:
+            self.acquire()
+            try:
+                if self.stream:
+                    self.stream.close()
+                    self.stream = None
+                self.baseFilename = os.fspath(daily_file_path(self.log_dir, self.configured_name))
+                self.current_day = day
+            finally:
+                self.release()
+        super().emit(record)
+
 def tcp_probe(host, port, timeout=2.0, samples=2):
     vals, errs = [], []
     for i in range(samples):
@@ -29,9 +66,10 @@ def tcp_probe(host, port, timeout=2.0, samples=2):
         if i < samples - 1:
             time.sleep(0.1)
     if not vals:
-        return {"ok": False, "avg_ms": None, "max_ms": None, "jitter_ms": None,
+        return {"ok": False, "min_ms": None, "avg_ms": None, "max_ms": None, "jitter_ms": None,
                 "loss_pct": 100.0, "error": errs[-1] if errs else "connection failed"}
     return {"ok": True,
+            "min_ms": round(min(vals),2),
             "avg_ms": round(sum(vals)/len(vals),2),
             "max_ms": round(max(vals),2),
             "jitter_ms": round(max(vals)-min(vals),2),
@@ -68,6 +106,7 @@ def fetch_cluster_view(cfg):
                            FROM performance_schema.replication_group_members ORDER BY MEMBER_HOST""")
             members = cur.fetchall()
             cur.execute("""SELECT MEMBER_ID,COUNT_CONFLICTS_DETECTED,
+                                  COUNT_TRANSACTIONS_IN_QUEUE,
                                   COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE
                            FROM performance_schema.replication_group_member_stats""")
             stats = cur.fetchall()
@@ -198,9 +237,187 @@ def append_jsonl(path,obj):
     with open(path,"a",encoding="utf-8") as f:
         f.write(json.dumps(obj,separators=(",",":"),default=str)+"\n")
 
+def network_health_event_id(cfg, timestamp, node_name, node_host):
+    raw = f"{cfg.get('monitor_name','')}|{cfg.get('cluster_name','')}|{timestamp}|{node_name}|{node_host}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def network_health_records(cfg, snap):
+    c = snap.get("cluster") or {}
+    members = c.get("members", []) if c.get("ok") else []
+    stats = c.get("stats", []) if c.get("ok") else []
+    member_by_host = {str(m.get("MEMBER_HOST", "")).lower(): m for m in members}
+    stat_by_id = {str(s.get("MEMBER_ID", "")): s for s in stats}
+    records = []
+    for n in snap.get("nodes", []):
+        host = str(n.get("host", ""))
+        member = member_by_host.get(host.lower())
+        if member is None:
+            member = next((m for m in members
+                           if str(m.get("MEMBER_HOST", "")).split(".")[0].lower() == str(n.get("name", "")).lower()), None)
+        st = stat_by_id.get(str(member.get("MEMBER_ID", ""))) if member else None
+        tcp = n.get("tcp") or {}
+        records.append({
+            "record_type": "network_health",
+            "event_id": network_health_event_id(cfg, snap["timestamp"], n.get("name"), host),
+            "timestamp": snap["timestamp"],
+            "monitor_name": cfg.get("monitor_name"),
+            "cluster_name": cfg.get("cluster_name"),
+            "target_node": n.get("name"),
+            "target_host": host,
+            "tcp_min_ms": tcp.get("min_ms"),
+            "tcp_avg_ms": tcp.get("avg_ms"),
+            "tcp_max_ms": tcp.get("max_ms"),
+            "jitter_ms": tcp.get("jitter_ms"),
+            "packet_loss_pct": tcp.get("loss_pct"),
+            "latency_state": n.get("latency_state"),
+            "member_state": member.get("MEMBER_STATE") if member else None,
+            "member_role": member.get("MEMBER_ROLE") if member else None,
+            "transactions_in_queue": st.get("COUNT_TRANSACTIONS_IN_QUEUE") if st else None,
+            "applier_queue": st.get("COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE") if st else None,
+            "conflicts_detected": st.get("COUNT_CONFLICTS_DETECTED") if st else None
+        })
+    return records
+
+def mysql_datetime_from_iso(value):
+    x = dt.datetime.fromisoformat(value)
+    if x.tzinfo is not None:
+        x = x.astimezone(UTC).replace(tzinfo=None)
+    return x
+
+def network_health_insert_sql(cfg):
+    p = cfg.get("network_health_db", {})
+    schema = str(p.get("schema", "monitor")).replace("`", "``")
+    table = str(p.get("table", "network_health")).replace("`", "``")
+    return f"""INSERT IGNORE INTO `{schema}`.`{table}`
+        (event_id,observed_at,monitor_name,cluster_name,target_node,target_host,
+         tcp_min_ms,tcp_avg_ms,tcp_max_ms,jitter_ms,packet_loss_pct,latency_state,
+         member_state,member_role,transactions_in_queue,applier_queue,conflicts_detected)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+
+def insert_network_health_record(cur, sql, r):
+    cur.execute(sql, (
+        r.get("event_id"), mysql_datetime_from_iso(r["timestamp"]), r.get("monitor_name"),
+        r.get("cluster_name"), r.get("target_node"), r.get("target_host"),
+        r.get("tcp_min_ms"), r.get("tcp_avg_ms"), r.get("tcp_max_ms"), r.get("jitter_ms"),
+        r.get("packet_loss_pct"), r.get("latency_state"), r.get("member_state"), r.get("member_role"),
+        r.get("transactions_in_queue"), r.get("applier_queue"), r.get("conflicts_detected")
+    ))
+
+def network_health_files(log_dir, configured_name):
+    p = Path(configured_name)
+    pattern = f"{p.stem}_*{p.suffix}"
+    return sorted(Path(log_dir).glob(pattern))
+
+def recent_network_health_records(paths, overlap_seconds, tail_bytes):
+    if overlap_seconds <= 0:
+        return []
+    cutoff = dt.datetime.now(UTC) - dt.timedelta(seconds=overlap_seconds)
+    rows = []
+    # The overlap can cross UTC midnight, so inspect the two newest daily files.
+    for path in list(paths)[-2:]:
+        if not Path(path).exists():
+            continue
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - int(tail_bytes))
+            f.seek(start)
+            if start > 0:
+                f.readline()
+            for raw in f:
+                try:
+                    r = json.loads(raw.decode("utf-8"))
+                    if r.get("record_type") != "network_health":
+                        continue
+                    ts = dt.datetime.fromisoformat(r["timestamp"])
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    else:
+                        ts = ts.astimezone(UTC)
+                    if ts >= cutoff:
+                        rows.append(r)
+                except Exception:
+                    continue
+    return rows
+
+def persist_network_health(cfg, log_dir, configured_name, state):
+    p = cfg.get("network_health_db", {})
+    if not p.get("enabled", False):
+        return
+    if not cfg["router"].get("enabled", True):
+        logging.warning("Network-health DB persistence skipped: Router is disabled.")
+        return
+
+    files = network_health_files(log_dir, configured_name)
+    if not files:
+        return
+
+    checkpoint_key = "network_health_db_checkpoint"
+    checkpoint = state.get(checkpoint_key, {})
+    checkpoint_file = checkpoint.get("file")
+    checkpoint_offset = int(checkpoint.get("offset", 0) or 0)
+
+    # Backward compatibility with the previous single-file offset checkpoint.
+    legacy_offset = int(state.get("network_health_db_offset", 0) or 0)
+    if not checkpoint_file and legacy_offset:
+        checkpoint_file = files[0].name
+        checkpoint_offset = legacy_offset
+
+    try:
+        conn = mysql_connect(cfg, cfg["router"]["host"], cfg["router"]["rw_port"])
+        cur = conn.cursor()
+        sql = network_health_insert_sql(cfg)
+
+        # Replay every daily JSONL file from the checkpoint forward.
+        started = checkpoint_file is None
+        for path in files:
+            if not started:
+                if path.name < checkpoint_file:
+                    continue
+                started = True
+
+            offset = checkpoint_offset if path.name == checkpoint_file else 0
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if offset > size:
+                    offset = 0
+                f.seek(offset)
+
+                while True:
+                    raw = f.readline()
+                    if not raw:
+                        break
+                    next_offset = f.tell()
+                    try:
+                        r = json.loads(raw.decode("utf-8"))
+                        if r.get("record_type") == "network_health":
+                            insert_network_health_record(cur, sql, r)
+                        state[checkpoint_key] = {"file": path.name, "offset": next_offset}
+                    except Exception as e:
+                        logging.warning("Network-health catch-up paused at %s offset %s: %s", path.name, offset, e)
+                        cur.close(); conn.close()
+                        return
+                    offset = next_offset
+
+            checkpoint_file = path.name
+            checkpoint_offset = offset
+
+        # Intentional back-date overlap across daily-file boundaries.
+        overlap_seconds = int(p.get("overlap_seconds", 600))
+        tail_bytes = int(p.get("overlap_tail_bytes", 2097152))
+        for r in recent_network_health_records(files, overlap_seconds, tail_bytes):
+            insert_network_health_record(cur, sql, r)
+
+        cur.close(); conn.close()
+        state.pop("network_health_db_offset", None)
+    except Exception as e:
+        # JSONL remains the durable source. Do not fail the monitoring cycle.
+        logging.warning("Network-health DB persistence deferred; daily JSONL retained for catch-up: %s", e)
+
 def load_state(path):
     try: return load_json(path)
-    except Exception: return {"active_alerts":{},"last_primary":None,"last_metrics_write":0}
+    except Exception: return {"active_alerts":{},"last_primary":None,"last_metrics_write":0,"network_health_db_checkpoint":{}}
 
 def save_state(path,state):
     tmp=str(path)+".tmp"
@@ -264,8 +481,9 @@ def main():
     if args.interval: cfg["interval_seconds"]=args.interval
     log_dir=Path(cfg["logging"]["directory"]); state_file=Path(cfg["state_file"])
     ensure_dir(log_dir); ensure_dir(state_file.parent)
+    monitor_log_name=cfg["logging"].get("monitor_log","monitor.log")
     logging.basicConfig(level=logging.INFO,format="%(asctime)s | %(levelname)s | %(message)s",
-                        handlers=[logging.FileHandler(log_dir/"monitor.log"),logging.StreamHandler(sys.stdout)])
+                        handlers=[DailyFileHandler(log_dir,monitor_log_name),logging.StreamHandler(sys.stdout)])
     if args.validate_config:
         print("CONFIG OK"); return
     if args.test_alert:
@@ -274,23 +492,33 @@ def main():
         if not args.disable_telegram: send_telegram(cfg,msg)
         print(msg); return
     state=load_state(state_file)
-    metrics_file=log_dir/cfg["logging"]["metrics_jsonl"]; event_file=log_dir/cfg["logging"]["events_jsonl"]
+    metrics_name=cfg["logging"]["metrics_jsonl"]
+    events_name=cfg["logging"]["events_jsonl"]
+    network_health_name=cfg.get("network_health_db",{}).get("jsonl","network_health.jsonl")
     interval=int(cfg.get("interval_seconds",120))
     metrics_every=int(cfg["logging"].get("metrics_snapshot_every_seconds",600))
     while True:
         start=time.time()
         try:
             snap=collect_snapshot(cfg,args.disable_app_check); alerts=evaluate(cfg,snap); text=summarize(cfg,snap,alerts)
+            event_file=daily_file_path(log_dir,events_name,snap["timestamp"])
+            metrics_file=daily_file_path(log_dir,metrics_name,snap["timestamp"])
+            network_health_file=daily_file_path(log_dir,network_health_name,snap["timestamp"])
             print(json.dumps(snap,indent=2,default=str)) if args.print_json else logging.info(text.replace("\n"," | "))
             process_alert_transitions(cfg,snap,alerts,state,event_file,args.disable_email,args.disable_telegram)
+            for record in network_health_records(cfg,snap):
+                append_jsonl(network_health_file,record)
+            persist_network_health(cfg,log_dir,network_health_name,state)
             if start-float(state.get("last_metrics_write",0))>=metrics_every:
                 append_jsonl(metrics_file,{"record_type":"metrics",**snap}); state["last_metrics_write"]=start
             save_state(state_file,state)
         except Exception as e:
             logging.exception("Monitor cycle failed: %s",e)
+            event_file=daily_file_path(log_dir,events_name)
             append_jsonl(event_file,{"timestamp":now_iso(),"record_type":"monitor_error","error":str(e)})
         if args.once: break
         time.sleep(max(1,interval-(time.time()-start)))
 
 if __name__=="__main__":
     main()
+
